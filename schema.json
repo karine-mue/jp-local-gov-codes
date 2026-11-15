@@ -1,77 +1,80 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "required": [
-    "code",
-    "code5",
-    "prefecture_code",
-    "prefecture_name",
-    "prefecture_kana",
-    "prefecture_kana_halfwidth",
-    "municipality_code",
-    "municipality_name",
-    "municipality_kana",
-    "municipality_kana_halfwidth",
-    "type"
-  ],
-  "properties": {
-    "code": {
-      "type": "string",
-      "pattern": "^\\d{6}$"
-    },
-    "code5": {
-      "type": "string",
-      "pattern": "^\\d{5}$"
-    },
-    "prefecture_code": {
-      "type": "string",
-      "pattern": "^\\d{2}$"
-    },
-    "prefecture_name": {
-      "type": "string"
-    },
-    "prefecture_kana": {
-      "type": "string"
-    },
-    "prefecture_kana_halfwidth": {
-      "type": "string"
-    },
-    "municipality_code": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "pattern": "^\\d{3}$"
-    },
-    "municipality_name": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "municipality_kana": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "municipality_kana_halfwidth": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "type": {
-      "type": "string",
-      "enum": [
-        "prefecture",
-        "designated_city",
-        "ward",
-        "special_ward",
-        "city",
-        "town",
-        "village"
-      ]
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "code",
+      "code5",
+      "prefecture_code",
+      "prefecture_name",
+      "prefecture_kana",
+      "prefecture_kana_halfwidth",
+      "municipality_code",
+      "municipality_name",
+      "municipality_kana",
+      "municipality_kana_halfwidth",
+      "type"
+    ],
+    "properties": {
+      "code": {
+        "type": "string",
+        "pattern": "^\\d{6}$"
+      },
+      "code5": {
+        "type": "string",
+        "pattern": "^\\d{5}$"
+      },
+      "prefecture_code": {
+        "type": "string",
+        "pattern": "^\\d{2}$"
+      },
+      "prefecture_name": {
+        "type": "string"
+      },
+      "prefecture_kana": {
+        "type": "string"
+      },
+      "prefecture_kana_halfwidth": {
+        "type": "string"
+      },
+      "municipality_code": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "pattern": "^\\d{3}$"
+      },
+      "municipality_name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "municipality_kana": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "municipality_kana_halfwidth": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "type": {
+        "type": "string",
+        "enum": [
+          "prefecture",
+          "designated_city",
+          "ward",
+          "special_ward",
+          "city",
+          "town",
+          "village"
+        ]
+      }
     }
   }
 }

@@ -111,6 +111,22 @@ class TestHistoryData(unittest.TestCase):
         self.assertEqual(by_code["224812"]["valid_to"], "2005-04-01")
         self.assertIsNone(by_code["224812"]["valid_from"])  # predates coverage
 
+    def test_abolished_codes_not_missing_from_lifespans(self):
+        # Regression (2026-11-16): codes abolished via kind 削除 rows
+        # (長岡市 merger, 2006-01-01) and via continued merger-mapping rows
+        # (佐久市 merger, 2005-04-01) used to vanish from lifespans entirely.
+        by_code = {s["code"]: s for s in self.lifespans}
+        for code in ("152153", "154032", "154041", "154067"):
+            self.assertEqual(by_code[code]["valid_to"], "2006-01-01", code)
+            self.assertIsNone(by_code[code]["valid_from"], code)
+        for code in ("203017", "203220"):
+            self.assertEqual(by_code[code]["valid_to"], "2005-04-01", code)
+            self.assertIsNone(by_code[code]["valid_from"], code)
+
+    def test_validate_lifespans_passes_on_real_data(self):
+        from build_codes import validate_lifespans
+        validate_lifespans(self.records, self.events, self.lifespans)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

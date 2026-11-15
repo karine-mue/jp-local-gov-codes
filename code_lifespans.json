@@ -7973,6 +7973,13 @@
     "valid_to": null
   },
   {
+    "code": "152153",
+    "name": "栃尾市",
+    "prefecture_name": "新潟県",
+    "valid_from": null,
+    "valid_to": "2006-01-01"
+  },
+  {
     "code": "152161",
     "name": "糸魚川市",
     "prefecture_name": "新潟県",
@@ -8183,11 +8190,32 @@
     "valid_to": "2005-04-01"
   },
   {
+    "code": "154032",
+    "name": "与板町",
+    "prefecture_name": "新潟県",
+    "valid_from": null,
+    "valid_to": "2006-01-01"
+  },
+  {
+    "code": "154041",
+    "name": "和島村",
+    "prefecture_name": "新潟県",
+    "valid_from": null,
+    "valid_to": "2006-01-01"
+  },
+  {
     "code": "154059",
     "name": "出雲崎町",
     "prefecture_name": "新潟県",
     "valid_from": null,
     "valid_to": null
+  },
+  {
+    "code": "154067",
+    "name": "寺泊町",
+    "prefecture_name": "新潟県",
+    "valid_from": null,
+    "valid_to": "2006-01-01"
   },
   {
     "code": "154211",
@@ -9373,6 +9401,13 @@
     "valid_to": null
   },
   {
+    "code": "203017",
+    "name": "臼田町",
+    "prefecture_name": "長野県",
+    "valid_from": null,
+    "valid_to": "2005-04-01"
+  },
+  {
     "code": "203033",
     "name": "小海町",
     "prefecture_name": "長野県",
@@ -9420,6 +9455,13 @@
     "prefecture_name": "長野県",
     "valid_from": null,
     "valid_to": null
+  },
+  {
+    "code": "203220",
+    "name": "望月町",
+    "prefecture_name": "長野県",
+    "valid_from": null,
+    "valid_to": "2005-04-01"
   },
   {
     "code": "203238",

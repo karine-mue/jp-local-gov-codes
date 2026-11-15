@@ -61,8 +61,12 @@ def check_digit(first5: str) -> int:
     for i, ch in enumerate(first5):
         total += int(ch) * weights[i]
     if total < 11:
-        return 11 - total
-    return (11 - (total % 11)) % 10
+        digit = 11 - total
+    else:
+        digit = (11 - (total % 11)) % 10
+    if not (0 <= digit <= 9):
+        raise ValueError(f"Invalid check digit {digit} computed for first5={first5!r}")
+    return digit
 
 def parse_date_cell(value: Any) -> datetime.date | None:
     if value is None or value == "〃":
@@ -120,9 +124,14 @@ def _extract_sheet_rows(ws) -> list[tuple[str, str | None, str | None, str | Non
         if row is None or len(row) < 5:
             continue
         code_raw = row[0]
-        if code_raw is None:
+        if code_raw is None or isinstance(code_raw, bool):
             continue
-        code = str(code_raw).strip()
+        if isinstance(code_raw, int):
+            code = f"{code_raw:06d}"
+        elif isinstance(code_raw, float) and code_raw.is_integer():
+            code = f"{int(code_raw):06d}"
+        else:
+            code = str(code_raw).strip()
         if len(code) != 6 or not code.isdigit():
             continue
         pref_name = _clean_cell_str(row[1])
@@ -157,6 +166,18 @@ def build_records(path: str | os.PathLike) -> list[dict]:
         for row in _extract_sheet_rows(designated_sheet):
             code, pref_name, muni_name, pref_kana_hw, muni_kana_hw = row
             if code in merged:
+                existing = merged[code]
+                incoming = {
+                    "prefecture_name": pref_name,
+                    "municipality_name": muni_name,
+                    "prefecture_kana_halfwidth": pref_kana_hw,
+                    "municipality_kana_halfwidth": muni_kana_hw,
+                }
+                for field, inc_val in incoming.items():
+                    if existing[field] != inc_val:
+                        raise ValueError(
+                            f"Mismatch for code {code} on field {field}: main={existing[field]!r} vs designated={inc_val!r}"
+                        )
                 merged[code]["in_designated"] = True
             else:
                 merged[code] = {
@@ -267,7 +288,7 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                 "kind": _clean_cell_str(row[8]),
                 "code_after": _clean_cell_str(code_after_cell),
                 "name_after": _clean_cell_str(row[10]),
-                "reason": row[12] if row[12] is None or isinstance(row[12], str) else str(row[12]),
+                "reason": _clean_cell_str(row[12]),
                 "date_cell": row[13],
             }
             current_block["rows"].append(r)
@@ -288,11 +309,12 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
             prev_nb = _UNSET
             prev_ca = _UNSET
             prev_na = _UNSET
+            prev_reason = _UNSET
             for r in block["rows"]:
                 raw_kind = r.get("kind")
                 if raw_kind == "新設":
                     change_type = "created"
-                elif raw_kind == "欠番":
+                elif raw_kind in ("欠番", "削除"):
                     change_type = "retired"
                 elif raw_kind == "〃":
                     if prev_kind is None:
@@ -300,8 +322,12 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                             f"Block {block['group_id']}: '〃' kind on first row of block"
                         )
                     change_type = prev_kind
-                else:
+                elif raw_kind is None:
                     change_type = "continued"
+                else:
+                    raise ValueError(
+                        f"Block {block['group_id']}: unknown kind {raw_kind!r}"
+                    )
                 code_before = _resolve_before_field(r["code_before"], prev_cb, "code_before")
                 name_before = _resolve_before_field(r["name_before"], prev_nb, "name_before")
                 code_after = _resolve_after_field(r["code_after"], code_before, prev_ca, "code_after")
@@ -311,11 +337,13 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                     name_after = name_before
                 else:
                     name_after = _resolve_after_field(r["name_after"], name_before, prev_na, "name_after")
+                reason = _resolve_before_field(r["reason"], prev_reason, "reason")
                 prev_kind = change_type
                 prev_cb = code_before
                 prev_nb = name_before
                 prev_ca = code_after
                 prev_na = name_after
+                prev_reason = reason
                 events.append(
                     {
                         "group_id": block["group_id"],
@@ -326,7 +354,7 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                         "name_before": name_before,
                         "code_after": code_after,
                         "name_after": name_after,
-                        "reason": r["reason"],
+                        "reason": reason,
                     }
                 )
         return events
@@ -334,6 +362,7 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
         wb.close()
 
 def derive_lifespans(records: list[dict], events: list[dict]) -> list[dict]:
+    current_codes = {rec["code"] for rec in records}
     lifespans: dict[str, dict] = {}
     for rec in records:
         code = rec["code"]
@@ -359,7 +388,7 @@ def derive_lifespans(records: list[dict], events: list[dict]) -> list[dict]:
                     "valid_from": None,
                     "valid_to": None,
                 }
-            if lifespans[code]["valid_from"] is None:
+            if lifespans[code]["valid_from"] is None or ev_date < lifespans[code]["valid_from"]:
                 lifespans[code]["valid_from"] = ev_date
         elif ctype == "retired" and ev.get("code_before") is not None:
             code = ev["code_before"]
@@ -371,8 +400,69 @@ def derive_lifespans(records: list[dict], events: list[dict]) -> list[dict]:
                     "valid_from": None,
                     "valid_to": None,
                 }
-            lifespans[code]["valid_to"] = ev_date
+            if lifespans[code]["valid_to"] is None or ev_date > lifespans[code]["valid_to"]:
+                lifespans[code]["valid_to"] = ev_date
+        elif (
+            ctype == "continued"
+            and ev.get("code_before") is not None
+            and ev.get("code_after") is not None
+            and ev["code_before"] != ev["code_after"]
+            and ev["code_before"] not in current_codes
+        ):
+            # Merger mapping row: a non-current code mapped onto a surviving
+            # code (e.g. 臼田町 -> 佐久市, 2005-04-01) ceased to exist on the
+            # event date even though the row's kind is not 欠番/削除.
+            code = ev["code_before"]
+            if code not in lifespans:
+                lifespans[code] = {
+                    "code": code,
+                    "name": ev.get("name_before"),
+                    "prefecture_name": pref_name,
+                    "valid_from": None,
+                    "valid_to": None,
+                }
+            if lifespans[code]["valid_to"] is None or ev_date > lifespans[code]["valid_to"]:
+                lifespans[code]["valid_to"] = ev_date
     return [lifespans[code] for code in sorted(lifespans.keys())]
+
+def validate_lifespans(records: list[dict], events: list[dict], lifespans: list[dict]) -> None:
+    violations: list[str] = []
+    current_codes = {rec["code"] for rec in records}
+    lifespan_by_code = {ls["code"]: ls for ls in lifespans}
+
+    for code in sorted(current_codes):
+        if code not in lifespan_by_code:
+            violations.append(f"Current record code {code} missing from lifespans")
+        elif lifespan_by_code[code]["valid_to"] is not None:
+            violations.append(
+                f"Current record code {code} has non-null valid_to={lifespan_by_code[code]['valid_to']!r}"
+            )
+
+    for ls in lifespans:
+        code = ls["code"]
+        v_from = ls["valid_from"]
+        v_to = ls["valid_to"]
+        if v_to is not None and code in current_codes:
+            violations.append(
+                f"Lifespan for current code {code} has valid_to={v_to!r}"
+            )
+        if v_from is not None and v_to is not None and v_to < v_from:
+            violations.append(
+                f"Lifespan for code {code} has valid_to ({v_to}) < valid_from ({v_from})"
+            )
+
+    event_codes: set[str] = set()
+    for ev in events:
+        if ev.get("code_before") is not None:
+            event_codes.add(ev["code_before"])
+        if ev.get("code_after") is not None:
+            event_codes.add(ev["code_after"])
+    for code in sorted(event_codes):
+        if code not in lifespan_by_code:
+            violations.append(f"Event code {code} missing from lifespans")
+
+    if violations:
+        raise ValueError("Lifespan validation failed:\n" + "\n".join(violations))
 
 def _write_csv(path: Path, keys: list[str], rows: list[dict]) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -388,20 +478,23 @@ def _write_json(path: Path, data: Any) -> None:
 def _build_schema() -> dict:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "required": RECORD_KEYS,
-        "properties": {
-            "code": {"type": "string", "pattern": r"^\d{6}$"},
-            "code5": {"type": "string", "pattern": r"^\d{5}$"},
-            "prefecture_code": {"type": "string", "pattern": r"^\d{2}$"},
-            "prefecture_name": {"type": "string"},
-            "prefecture_kana": {"type": "string"},
-            "prefecture_kana_halfwidth": {"type": "string"},
-            "municipality_code": {"type": ["string", "null"], "pattern": r"^\d{3}$"},
-            "municipality_name": {"type": ["string", "null"]},
-            "municipality_kana": {"type": ["string", "null"]},
-            "municipality_kana_halfwidth": {"type": ["string", "null"]},
-            "type": {"type": "string", "enum": ["prefecture", "designated_city", "ward", "special_ward", "city", "town", "village"]},
+        "type": "array",
+        "items": {
+            "type": "object",
+            "required": RECORD_KEYS,
+            "properties": {
+                "code": {"type": "string", "pattern": r"^\d{6}$"},
+                "code5": {"type": "string", "pattern": r"^\d{5}$"},
+                "prefecture_code": {"type": "string", "pattern": r"^\d{2}$"},
+                "prefecture_name": {"type": "string"},
+                "prefecture_kana": {"type": "string"},
+                "prefecture_kana_halfwidth": {"type": "string"},
+                "municipality_code": {"type": ["string", "null"], "pattern": r"^\d{3}$"},
+                "municipality_name": {"type": ["string", "null"]},
+                "municipality_kana": {"type": ["string", "null"]},
+                "municipality_kana_halfwidth": {"type": ["string", "null"]},
+                "type": {"type": "string", "enum": ["prefecture", "designated_city", "ward", "special_ward", "city", "town", "village"]},
+            },
         },
     }
 
@@ -441,6 +534,7 @@ def main(argv: list[str] | None = None) -> None:
         validate_records(records)
         events = build_history_events(history_path)
         lifespans = derive_lifespans(records, events)
+        validate_lifespans(records, events, lifespans)
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         _write_csv(out_dir / "local_gov_codes.csv", RECORD_KEYS, records)
