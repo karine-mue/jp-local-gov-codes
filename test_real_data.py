@@ -76,7 +76,17 @@ class TestHistoryData(unittest.TestCase):
 
     def test_change_types(self):
         types = {e["change_type"] for e in self.events}
-        self.assertTrue(types <= {"created", "retired", "continued"})
+        self.assertEqual(types, {"created", "retired", "continued"})
+
+    def test_nagaoka_deletion_rows_are_retired(self):
+        # The 2006-01-01 Nagaoka merger rows carry kind 削除 (not 欠番);
+        # all four must be classified retired in history_events itself.
+        ev = [e for e in self.events
+              if e["date"] == "2006-01-01"
+              and e["code_before"] in ("152153", "154032", "154041", "154067")]
+        self.assertEqual(len(ev), 4)
+        for e in ev:
+            self.assertEqual(e["change_type"], "retired", e)
 
     def test_hamamatsu_ward_reorg(self):
         ev = [e for e in self.events
@@ -103,7 +113,8 @@ class TestHistoryData(unittest.TestCase):
             if span["valid_to"] is not None:
                 self.assertNotIn(code, current)
             if span["valid_from"] and span["valid_to"]:
-                self.assertLess(span["valid_from"], span["valid_to"])
+                # SPEC: same-day valid_from == valid_to is allowed
+                self.assertLessEqual(span["valid_from"], span["valid_to"])
 
     def test_retired_code_lifespan(self):
         by_code = {s["code"]: s for s in self.lifespans}
@@ -126,6 +137,34 @@ class TestHistoryData(unittest.TestCase):
     def test_validate_lifespans_passes_on_real_data(self):
         from build_codes import validate_lifespans
         validate_lifespans(self.records, self.events, self.lifespans)
+
+
+class TestSchema(unittest.TestCase):
+    def test_shipped_outputs_validate_against_schema(self):
+        import json
+
+        from build_codes import _build_schema
+
+        with open("schema.json", encoding="utf-8") as f:
+            schema = json.load(f)
+        self.assertEqual(schema, _build_schema())
+        with open("local_gov_codes.json", encoding="utf-8") as f:
+            data = json.load(f)
+        try:
+            import jsonschema
+        except ImportError:
+            jsonschema = None
+        if jsonschema is not None:
+            jsonschema.validate(data, schema)
+        else:
+            # Structural fallback: array root, required keys, code pattern.
+            import re
+
+            self.assertIsInstance(data, list)
+            for rec in data:
+                for key in schema["items"]["required"]:
+                    self.assertIn(key, rec)
+                self.assertRegex(rec["code"], r"^\d{6}$")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import tempfile
 import unicodedata
 import urllib.request
@@ -54,7 +55,7 @@ _ERA_BASES = {
 _ERA_RE = re.compile(r"^([RHS])(\d+)[.．](\d+)[.．](\d+)$")
 
 def check_digit(first5: str) -> int:
-    if not isinstance(first5, str) or len(first5) != 5 or not first5.isdigit():
+    if not isinstance(first5, str) or len(first5) != 5 or not (first5.isascii() and first5.isdigit()):
         raise ValueError(f"Invalid first5: {first5!r}")
     weights = [6, 5, 4, 3, 2]
     total = 0
@@ -81,7 +82,7 @@ def parse_date_cell(value: Any) -> datetime.date | None:
         return datetime.date(1899, 12, 30) + datetime.timedelta(days=int(value))
     if isinstance(value, str):
         stripped = value.strip()
-        if stripped == "〃":
+        if stripped in ("", "〃"):
             return None
         m = _ERA_RE.match(stripped)
         if m:
@@ -130,10 +131,14 @@ def _extract_sheet_rows(ws) -> list[tuple[str, str | None, str | None, str | Non
             code = f"{code_raw:06d}"
         elif isinstance(code_raw, float) and code_raw.is_integer():
             code = f"{int(code_raw):06d}"
+        elif isinstance(code_raw, str):
+            code = code_raw.strip()
+            if not code:
+                continue
         else:
-            code = str(code_raw).strip()
-        if len(code) != 6 or not code.isdigit():
-            continue
+            raise ValueError(f"Invalid code cell {code_raw!r} in sheet {ws.title!r}")
+        if len(code) != 6 or not (code.isascii() and code.isdigit()):
+            raise ValueError(f"Invalid code cell {code_raw!r} in sheet {ws.title!r}")
         pref_name = _clean_cell_str(row[1])
         muni_name = _clean_cell_str(row[2])
         pref_kana_hw = _clean_cell_str(row[3])
@@ -144,6 +149,8 @@ def _extract_sheet_rows(ws) -> list[tuple[str, str | None, str | None, str | Non
 def build_records(path: str | os.PathLike) -> list[dict]:
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
+        if len(wb.worksheets) != 2:
+            raise ValueError(f"Expected exactly two sheets, got {len(wb.worksheets)}")
         designated_sheet = None
         main_sheet = None
         for ws in wb.worksheets:
@@ -156,6 +163,8 @@ def build_records(path: str | os.PathLike) -> list[dict]:
         merged: dict[str, dict[str, Any]] = {}
         for row in _extract_sheet_rows(main_sheet):
             code, pref_name, muni_name, pref_kana_hw, muni_kana_hw = row
+            if code in merged:
+                raise ValueError(f"Duplicate code in main sheet: {code}")
             merged[code] = {
                 "prefecture_name": pref_name,
                 "municipality_name": muni_name,
@@ -210,6 +219,8 @@ def build_records(path: str | os.PathLike) -> list[dict]:
                 "type": classify_type(pref_name, muni_name, in_designated),
             }
             records.append(rec)
+        if not records:
+            raise ValueError("No records found in workbook")
         return records
     finally:
         wb.close()
@@ -218,7 +229,12 @@ def validate_records(records: list[dict]) -> None:
     failing = []
     for rec in records:
         code = rec["code"]
-        if int(code[5]) != check_digit(code[:5]):
+        try:
+            expected = check_digit(code[:5])
+        except ValueError:
+            failing.append(code)
+            continue
+        if int(code[5]) != expected:
             failing.append(code)
     if failing:
         raise ValueError(f"Invalid check digits for codes: {', '.join(failing)}")
@@ -252,7 +268,28 @@ def _is_data_code_cell(value: str | None) -> bool:
         return False
     if value in ("〃", "同左", "削除"):
         return True
-    return len(value) == 6 and value.isdigit()
+    return len(value) == 6 and value.isascii() and value.isdigit()
+
+# 改正一覧表 sheet layout: 14 columns wide. Columns used (0-based):
+#   4 都道府県名 / 5 改正前コード / 6 改正前名称 / 8 コードの改定区分 /
+#   9 改正後コード / 10 改正後名称 / 12 改正事由等 / 13 施行年月日
+_COL_PREFECTURE = 4
+_COL_CODE_BEFORE = 5
+_COL_NAME_BEFORE = 6
+_COL_KIND = 8
+_COL_CODE_AFTER = 9
+_COL_NAME_AFTER = 10
+_COL_REASON = 12
+_COL_DATE = 13
+
+def _normalize_code_cell(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return f"{value:06d}"
+    if isinstance(value, float) and value.is_integer():
+        return f"{int(value):06d}"
+    return _clean_cell_str(value)
 
 def build_history_events(path: str | os.PathLike) -> list[dict]:
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -265,10 +302,10 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row is None or len(row) < 14:
                 continue
-            pref_cell = row[4]
-            code_before_cell = row[5]
-            code_after_cell = row[9]
-            if not _is_data_code_cell(_clean_cell_str(code_before_cell)) and not _is_data_code_cell(_clean_cell_str(code_after_cell)):
+            pref_cell = row[_COL_PREFECTURE]
+            code_before_cell = _normalize_code_cell(row[_COL_CODE_BEFORE])
+            code_after_cell = _normalize_code_cell(row[_COL_CODE_AFTER])
+            if not _is_data_code_cell(code_before_cell) and not _is_data_code_cell(code_after_cell):
                 continue
             pref_str = _clean_cell_str(pref_cell)
             if pref_str is not None:
@@ -283,13 +320,13 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                 raise ValueError("First data row has no prefecture name")
             r = {
                 "prefecture_name": pref_str,
-                "code_before": _clean_cell_str(code_before_cell),
-                "name_before": _clean_cell_str(row[6]),
-                "kind": _clean_cell_str(row[8]),
-                "code_after": _clean_cell_str(code_after_cell),
-                "name_after": _clean_cell_str(row[10]),
-                "reason": _clean_cell_str(row[12]),
-                "date_cell": row[13],
+                "code_before": code_before_cell,
+                "name_before": _clean_cell_str(row[_COL_NAME_BEFORE]),
+                "kind": _clean_cell_str(row[_COL_KIND]),
+                "code_after": code_after_cell,
+                "name_after": _clean_cell_str(row[_COL_NAME_AFTER]),
+                "reason": _clean_cell_str(row[_COL_REASON]),
+                "date_cell": row[_COL_DATE],
             }
             current_block["rows"].append(r)
             parsed = parse_date_cell(r["date_cell"])
@@ -304,7 +341,7 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                 )
             block_date = next(iter(dates))
             block_date_iso = block_date.isoformat()
-            prev_kind: str | None = None
+            prev_kind = _UNSET
             prev_cb = _UNSET
             prev_nb = _UNSET
             prev_ca = _UNSET
@@ -317,11 +354,13 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                 elif raw_kind in ("欠番", "削除"):
                     change_type = "retired"
                 elif raw_kind == "〃":
-                    if prev_kind is None:
+                    if prev_kind is _UNSET:
                         raise ValueError(
                             f"Block {block['group_id']}: '〃' kind on first row of block"
                         )
                     change_type = prev_kind
+                elif raw_kind is None and r["code_after"] == "削除":
+                    change_type = "retired"
                 elif raw_kind is None:
                     change_type = "continued"
                 else:
@@ -357,6 +396,8 @@ def build_history_events(path: str | os.PathLike) -> list[dict]:
                         "reason": reason,
                     }
                 )
+        if not blocks or not events:
+            raise ValueError("No history events found in workbook")
         return events
     finally:
         wb.close()
@@ -374,55 +415,74 @@ def derive_lifespans(records: list[dict], events: list[dict]) -> list[dict]:
             "valid_from": None,
             "valid_to": None,
         }
+    last_date: dict[str, str] = {}
+    for ev in events:
+        for c in (ev.get("code_before"), ev.get("code_after")):
+            if c is not None and (c not in last_date or ev["date"] > last_date[c]):
+                last_date[c] = ev["date"]
+    # Name candidates per code: ((date, side_rank, name), name, prefecture).
+    # side_rank: 0 = before side, 1 = after side (after wins on the same date).
+    # The winning candidate is the name at the code's latest event, so the
+    # result does not depend on the order of events.
+    name_candidates: dict[str, tuple] = {}
+
+    def _consider(code, date, rank, name, pref_name):
+        if code is None or name is None:
+            return
+        key = (date, rank, name)
+        if code not in name_candidates or key > name_candidates[code][0]:
+            name_candidates[code] = (key, name, pref_name)
+
+    for ev in events:
+        _consider(ev.get("code_before"), ev["date"], 0, ev.get("name_before"), ev["prefecture_name"])
+        _consider(ev.get("code_after"), ev["date"], 1, ev.get("name_after"), ev["prefecture_name"])
+
+    def _ensure_row(code: str) -> dict:
+        if code not in lifespans:
+            cand = name_candidates.get(code)
+            lifespans[code] = {
+                "code": code,
+                "name": cand[1] if cand is not None else None,
+                "prefecture_name": cand[2] if cand is not None else None,
+                "valid_from": None,
+                "valid_to": None,
+            }
+        return lifespans[code]
+
     for ev in events:
         ctype = ev["change_type"]
         ev_date = ev["date"]
-        pref_name = ev["prefecture_name"]
-        if ctype == "created" and ev.get("code_after") is not None:
-            code = ev["code_after"]
-            if code not in lifespans:
-                lifespans[code] = {
-                    "code": code,
-                    "name": ev.get("name_after"),
-                    "prefecture_name": pref_name,
-                    "valid_from": None,
-                    "valid_to": None,
-                }
-            if lifespans[code]["valid_from"] is None or ev_date < lifespans[code]["valid_from"]:
-                lifespans[code]["valid_from"] = ev_date
-        elif ctype == "retired" and ev.get("code_before") is not None:
-            code = ev["code_before"]
-            if code not in lifespans:
-                lifespans[code] = {
-                    "code": code,
-                    "name": ev.get("name_before"),
-                    "prefecture_name": pref_name,
-                    "valid_from": None,
-                    "valid_to": None,
-                }
-            if lifespans[code]["valid_to"] is None or ev_date > lifespans[code]["valid_to"]:
-                lifespans[code]["valid_to"] = ev_date
+        if ctype == "created":
+            if ev.get("code_after") is None:
+                raise ValueError(f"created event without code_after: {ev!r}")
+            row = _ensure_row(ev["code_after"])
+            if row["valid_from"] is None or ev_date < row["valid_from"]:
+                row["valid_from"] = ev_date
+        elif ctype == "retired":
+            if ev.get("code_before") is None:
+                raise ValueError(f"retired event without code_before: {ev!r}")
+            row = _ensure_row(ev["code_before"])
+            if row["valid_to"] is None or ev_date > row["valid_to"]:
+                row["valid_to"] = ev_date
         elif (
             ctype == "continued"
             and ev.get("code_before") is not None
             and ev.get("code_after") is not None
             and ev["code_before"] != ev["code_after"]
             and ev["code_before"] not in current_codes
+            and ev_date == last_date.get(ev["code_before"])
         ):
             # Merger mapping row: a non-current code mapped onto a surviving
             # code (e.g. 臼田町 -> 佐久市, 2005-04-01) ceased to exist on the
-            # event date even though the row's kind is not 欠番/削除.
-            code = ev["code_before"]
-            if code not in lifespans:
-                lifespans[code] = {
-                    "code": code,
-                    "name": ev.get("name_before"),
-                    "prefecture_name": pref_name,
-                    "valid_from": None,
-                    "valid_to": None,
-                }
-            if lifespans[code]["valid_to"] is None or ev_date > lifespans[code]["valid_to"]:
-                lifespans[code]["valid_to"] = ev_date
+            # event date even though the row's kind is not 欠番/削除. The
+            # last-appearance condition keeps a code that shows up again in
+            # a later event from being closed here.
+            row = _ensure_row(ev["code_before"])
+            if row["valid_to"] is None or ev_date > row["valid_to"]:
+                row["valid_to"] = ev_date
+        for c in (ev.get("code_before"), ev.get("code_after")):
+            if c is not None:
+                _ensure_row(c)
     return [lifespans[code] for code in sorted(lifespans.keys())]
 
 def validate_lifespans(records: list[dict], events: list[dict], lifespans: list[dict]) -> None:
@@ -442,14 +502,18 @@ def validate_lifespans(records: list[dict], events: list[dict], lifespans: list[
         code = ls["code"]
         v_from = ls["valid_from"]
         v_to = ls["valid_to"]
-        if v_to is not None and code in current_codes:
-            violations.append(
-                f"Lifespan for current code {code} has valid_to={v_to!r}"
-            )
         if v_from is not None and v_to is not None and v_to < v_from:
             violations.append(
                 f"Lifespan for code {code} has valid_to ({v_to}) < valid_from ({v_from})"
             )
+        if code not in current_codes and v_to is None:
+            violations.append(
+                f"Lifespan for non-current code {code} has no valid_to"
+            )
+        if ls["name"] is None:
+            violations.append(f"Lifespan for code {code} has no name")
+        if ls["prefecture_name"] is None:
+            violations.append(f"Lifespan for code {code} has no prefecture_name")
 
     event_codes: set[str] = set()
     for ev in events:
@@ -537,13 +601,27 @@ def main(argv: list[str] | None = None) -> None:
         validate_lifespans(records, events, lifespans)
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        _write_csv(out_dir / "local_gov_codes.csv", RECORD_KEYS, records)
-        _write_json(out_dir / "local_gov_codes.json", records)
-        _write_csv(out_dir / "history_events.csv", EVENT_KEYS, events)
-        _write_json(out_dir / "history_events.json", events)
-        _write_csv(out_dir / "code_lifespans.csv", LIFESPAN_KEYS, lifespans)
-        _write_json(out_dir / "code_lifespans.json", lifespans)
-        _write_json(out_dir / "schema.json", _build_schema())
+        staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=out_dir))
+        try:
+            _write_csv(staging / "local_gov_codes.csv", RECORD_KEYS, records)
+            _write_json(staging / "local_gov_codes.json", records)
+            _write_csv(staging / "history_events.csv", EVENT_KEYS, events)
+            _write_json(staging / "history_events.json", events)
+            _write_csv(staging / "code_lifespans.csv", LIFESPAN_KEYS, lifespans)
+            _write_json(staging / "code_lifespans.json", lifespans)
+            _write_json(staging / "schema.json", _build_schema())
+            for name in (
+                "local_gov_codes.csv",
+                "local_gov_codes.json",
+                "history_events.csv",
+                "history_events.json",
+                "code_lifespans.csv",
+                "code_lifespans.json",
+                "schema.json",
+            ):
+                os.replace(staging / name, out_dir / name)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
         print(f"records={len(records)} events={len(events)} lifespans={len(lifespans)}")
     finally:
         for temp_file in temp_files:
